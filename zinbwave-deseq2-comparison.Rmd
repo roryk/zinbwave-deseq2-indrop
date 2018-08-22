@@ -1,0 +1,268 @@
+---
+title: DESeq2 vs DESeq2 + ZINB-WaVE for inDrop data
+category: research
+subcategory: rnaseq
+tags: [singlecell_rnaseq, differential_expression, ZINB-WaVE, DESeq2]
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    code_folding: show
+    theme: readable
+    df_print: paged
+    fig_width: 8.5
+    fig_height: 5
+---
+
+```{r set-publication-theme, echo=FALSE, cache=FALSE}
+ggplot2::theme_set(ggpubr::theme_pubr(base_size=10, base_family="Gill Sans MT"))
+```
+
+```{r 'setup', echo = FALSE, cache = FALSE}
+knitr::opts_chunk$set(dev = c('png', 'cairo_pdf'), 
+                      fig.align = 'center', fig.height = 5, fig.width = 8.5,
+                      warning=FALSE,
+#                      pdf.options(encoding = "ISOLatin9.enc"),
+                      fig.path='figures/')
+```
+
+```{r load-libraries}
+library(zinbwave)
+library(DESeq2)
+library(tidyverse)
+library(ggplot2)
+
+```
+
+```{r load-dds-objects-and-subset}
+load("data/dds-noweights.rda")
+load("data/dds-weights.rda")
+dds_noweights = ddsraw
+group0cells = rownames(subset(colData(dds_noweights), res.0.8 == 0))
+dds_g0_weights = dds_weights[, group0cells]
+colData(dds_g0_weights)$genoregion = droplevels(colData(dds_g0_weights)$genoregion)
+dds_g0_noweights = dds_noweights[, group0cells]
+colData(dds_g0_noweights)$genoregion = droplevels(colData(dds_g0_noweights)$genoregion)
+g0_wt_anterior_cells = rownames(subset(colData(dds_g0_weights, genoregion == "wt_anterior")))
+g0_mutant_anterior_cells = rownames(subset(colData(dds_g0_weights, genoregion == "mutant_anterior")))
+```
+
+# Overview
+This is a report looking at the differences between DESeq2 and ZINB-WaVE + DESeq2 for
+doing differential expression calls on inDrop data. This report grew out of a
+discussion with Mike Love, Koen Van den Berge and Mike Steinbaugh on the
+Bioconductor support site [here](https://support.bioconductor.org/p/112163/). 
+To summarize, we noticed that we were missing calls in ZINB-WaVE weighted
+data at the low end of expression where calls that looked specific to one
+condition appeared like they were being missed. See the link to the discussion
+above for some more information.
+
+# Data background
+This is an inDrop dataset of cells consisting of 
+`r ncol(ddsraw)` cells after quality control and filtering. The cells are from
+different parts of an organ, in a wildtype and mutant mouse. For this
+example, we want to look at the different between the `wt_anterior` and the
+`mutant_anterior` cells in group 0. There are `r nrow(dds_g0_weights)` cells in
+group 0, `r length(g0_wt_anterior_cells)` are `wt_anterior` cells and 
+`r length(g0_mutant_anterior_cells)` are `mutant_anterior` cells. 
+
+# Preprocessing
+We pulled the raw data out of our Seurat object, created a SummarizedExperiment 
+object from it and ran and saved the ZINB-WaVE weight calculations. We then
+made two DESeqDataSet objects, one with the weights called `dds_weights` and 
+one without called `dds_noweights`. The script to do that is in 
+[make-example-objects.R](make-example-objects) and is quoted below:
+
+```
+library(Seurat)
+library(tidyverse)
+library(zinbwave)
+library(DESeq2)
+
+load("data/seurat.rda")
+
+## Make SE object from Seurat object
+metadata = seurat@meta.data
+metadata$genoregion = as.factor(paste(metadata$genotype, metadata$region, sep="_"))
+counts = seurat@raw.data
+counts = counts[Matrix::rowSums(counts >= 5) >= 5, ]
+metadata$genoregion = gsub("anerior", "anterior", metadata$genoregion)
+metadata$genotype = gsub("anerior", "anterior", metadata$genotype)
+se = SummarizedExperiment(assays=list(counts=as.matrix(counts)),
+                          colData=metadata)
+
+
+## create and save dds object with ZINB-WaVE weights
+weight_fn = file.path("data", "dds-weights.rda")
+design = model.matrix(~genoregion, data=colData(se))
+epsilon_de = 1e12
+zinb = zinbFit(se, K=0, epsilon=epsilon_de, BPPARAM=BiocParallel::SerialParam(),
+                X = design)
+counts_zinb = zinbwave(se, fitted_model = zinb, K = 0, epsilon=epsilon_de)
+dds_weights = DESeqDataSet(counts_zinb, design=~1+genoregion)
+save(dds_weights, file=weight_fn)
+
+## create and save dds object without weights
+noweight_fn = file.path("data", "dds-noweights.rda")
+ddsraw = DESeqDataSet(se, design=~1+genoregion)
+save(ddsraw, file=noweight_fn)
+```
+
+We pulled in the two DESeqDataSets and subset them to the cells in group 0. 
+These are `dds_g0_weights` and `dds_g0_noweights`.
+
+```{r extract-low-calls}
+extract_low_markers = function(res, lfc_cutoff=10) {
+  
+}
+```
+
+# Differential expression
+## with weights
+```{r weights-fit}
+contrast = c("genoregion", "mutant_anterior", "wt_anterior")
+dds_g0_weights = DESeq(dds_g0_weights, test="LRT", full=~1+genoregion, reduced=~1,
+                       sfType="poscounts", minmu=1e-6, minRep=Inf)
+```
+
+```{r weights-de}
+g0_weights_results = results(dds_g0_weights, contrast=contrast, cooksCutoff=FALSE)
+plotMA(g0_weights_results)
+```
+
+## without weights
+```{r noweights-fit}
+dds_g0_noweights = DESeq(dds_g0_noweights, test="LRT", full=~1+genoregion, reduced=~1,
+                       sfType="poscounts", minmu=1e-6, minRep=Inf)
+```
+
+```{r noweights-de}
+g0_noweights_results = results(dds_g0_noweights, contrast=contrast, cooksCutoff=FALSE)
+plotMA(g0_noweights_results)
+```
+
+# Comparison of DESeq2 and DESeq2 + ZINB-WaVE 
+The p-values aren't really correlated to each other across much of the range,
+but the LFCs are:
+
+```{r deseq2-deseq-zinbwave-comparison}
+results = data.frame(symbol=rownames(g0_weights_results),
+                     baseMean=g0_weights_results$baseMean,
+                     weights_pval=g0_weights_results$pvalue,
+                     weights_padj=g0_weights_results$padj,
+                     weights_lfc=g0_weights_results$log2FoldChange,
+                     weights_lfcSE=g0_weights_results$lfcSE,
+                     noweights_pval=g0_noweights_results$pvalue,
+                     noweights_lfc=g0_noweights_results$log2FoldChange,
+                     noweights_lfcSE=g0_noweights_results$lfcSE,
+                     noweights_padj=g0_noweights_results$padj)
+ggplot(results, aes(weights_pval, noweights_pval)) +
+  geom_point() +
+  xlab("weighted p-value") +
+  ylab("unweighted p-value")
+  
+ggplot(results, aes(weights_lfc, noweights_lfc)) +
+  geom_point() +
+  xlab("weighted LFC") +
+  ylab("unweighted LFC")
+```
+
+```{r overlap-DE-genes}
+weighted_siggenes = subset(results, weights_padj < 0.05)$symbol
+noweighted_siggenes = subset(results, noweights_padj < 0.05)$symbol
+allsig = union(weighted_siggenes, noweighted_siggenes)
+both = intersect(weighted_siggenes, noweighted_siggenes)
+weighted_specific = weighted_siggenes[!weighted_siggenes %in% noweighted_siggenes]
+noweighted_specific = noweighted_siggenes[!noweighted_siggenes %in% weighted_siggenes]
+```
+
+The unweighted results are a superset of the weighted results.
+
+```{r overlap}
+setinfo = list(weighted=weighted_siggenes, unweighted=noweighted_siggenes)
+UpSetR::upset(fromList(setinfo))
+```
+
+```{r unweighted-specific-characteristics}
+results$present = ifelse(results$symbol %in% both, "both",
+                         ifelse(results$symbol %in% noweighted_specific,
+                                "noweighted_specific", "notsig"))
+```
+
+The unweighted-specific genes are distributed across the baseMean spectrum, so
+it isn't specifically low or high genes we are missing.
+
+```{r distributions-on-found-basemean}
+ggplot(results, aes(baseMean)) +
+  geom_histogram() +
+  facet_wrap(~present) +
+  scale_x_log10()
+```
+
+We are missing calls for large LFC genes with the ZINB-WaVE weighted calls, 
+but there are differences across the spectrum.
+
+```{r distribution-on-found-lfc}
+ggplot(results, aes(weights_lfc, noweights_lfc)) +
+  geom_point(alpha=0.5) +
+  facet_wrap(~present) +
+  xlab("weighted LFC") +
+  ylab("unweighted LFC")
+```
+
+It's possible that DESeq2 is calling too liberally with no weights
+and too strict with ZINB-WaVE weights though.
+
+# low baseMean, high LFC genes
+I selected genes with a LFC > 10 and a baseMean > 0.3. If we include all of
+the facets, these don't look super impressive:
+
+```{r low-basemean-high-lfc}
+low = as.character(subset(results, abs(noweights_lfc) > 10 & baseMean > 0.3)$symbol)
+lowdat = counts(dds_g0_noweights)[low,] %>%
+  as.data.frame() %>%
+  tibble::rownames_to_column("symbol") %>%
+  gather(cell, UMI, -symbol) %>%
+  left_join(colData(dds_noweights) %>%
+            as.data.frame() %>%
+            tibble::rownames_to_column("cell")) %>%
+  left_join(results)
+ggplot(lowdat, aes(symbol, UMI, color=genoregion)) +
+  coord_flip() +
+  geom_jitter(size=0.5)  +
+  xlab("") +
+  facet_wrap(~present, scale="free") 
+```
+
+But if we subset down to just the contrasts we are interested in, they do look
+like they should be called DE, and DESeq2 alone calls most of these.
+
+```{r low-basemean-high-lfc-anterior-only}
+lowdat = counts(dds_g0_noweights)[low,] %>%
+  as.data.frame() %>%
+  tibble::rownames_to_column("symbol") %>%
+  gather(cell, UMI, -symbol) %>%
+  left_join(colData(dds_noweights) %>%
+            as.data.frame() %>%
+            tibble::rownames_to_column("cell")) %>%
+  dplyr::filter(genoregion %in% c("mutant_anterior", "wt_anterior")) %>%
+  left_join(results)
+ggplot(lowdat, aes(symbol, UMI, color=genoregion)) +
+  coord_flip() +
+  geom_jitter(size=0.5)  +
+  xlab("") +
+  facet_wrap(~present, scale="free") 
+```
+
+# Summary
+ZINB-WaVE weights are causing a lot of what appear to be false negatives to me
+in this inDrop dataset. There's been some talk that there may not be a need to
+add a zero inflated component to experiments that use UMIs (see 
+[this paper](https://www.biorxiv.org/content/early/2018/08/17/225177)) for example.
+
+# Links to raw data
+[Seurat object](https://www.dropbox.com/s/xa9xql7pjx9l7tb/seurat.rda?dl=1)
+
+[DDS object, no weights](https://www.dropbox.com/s/pq5sogzyp7edz0y/dds-noweights.rda?dl=1)
+
+[DDS object, with weights](https://www.dropbox.com/s/kh3yoyxg5outybx/dds-weights.rda?dl=1)
